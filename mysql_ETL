@@ -1,0 +1,93 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+
+# Initialize Spark Session
+# IMPORTANT: Configure the path to your MySQL JDBC driver JAR file.
+# Download it from: https://dev.mysql.com/downloads/connector/j/
+spark = SparkSession.builder \
+    .appName("SalesDataToMySQL") \
+    .config("spark.jars", "/path/to/mysql-connector-java-8.0.28.jar") \
+    .getOrCreate()
+
+# Define file paths (assuming these are accessible by Spark)
+customers_file = "MultipleFiles/customers.csv"
+sales_file = "MultipleFiles/sales.csv"
+returns_file = "MultipleFiles/returns.csv"
+
+# --- 1. Read CSV files into DataFrames ---
+try:
+    customers_df = spark.read.csv(customers_file, header=True, inferSchema=True)
+    sales_df = spark.read.csv(sales_file, header=True, inferSchema=True)
+    returns_df = spark.read.csv(returns_file, header=True, inferSchema=True)
+    print("Successfully read all CSV files.")
+
+except Exception as e:
+    print(f"Error reading CSV files: {e}")
+    spark.stop()
+    exit() # Exit if files cannot be read
+
+# --- 2. Clean and Join the Data ---
+
+# Ensure 'price' and 'quantity' are numeric in sales_df
+sales_df = sales_df.withColumn("price", col("price").cast("float")) \
+                   .withColumn("quantity", col("quantity").cast("integer"))
+
+# Join sales with customers on 'customer_id'
+joined_df = sales_df.join(customers_df, on="customer_id", how="left")
+
+# Join the result with returns on 'sale_id'
+final_df = joined_df.join(returns_df, on="sale_id", how="left")
+
+# Prepare the final DataFrame for MySQL by selecting and renaming columns
+mysql_ready_df = final_df.select(
+    col("sale_id"),
+    col("customer_id"),
+    col("name").alias("customer_name"),
+    col("email").alias("customer_email"),
+    col("region").alias("customer_region"),
+    col("product_id"),
+    col("quantity"),
+    col("price"),
+    col("sale_date"),
+    col("return_date"),
+    col("reason").alias("return_reason")
+)
+
+print("\nProcessed DataFrame Schema:")
+mysql_ready_df.printSchema()
+print("\nProcessed DataFrame Sample:")
+mysql_ready_df.show(5, truncate=False)
+
+# --- 3. Push the Processed Data to MySQL ---
+
+# MySQL Connection Configuration
+jdbc_url = "jdbc:mysql://localhost:3306/your_database_name" # <<< CHANGE THIS
+connection_properties = {
+    "user": "your_mysql_username",      # <<< CHANGE THIS
+    "password": "your_mysql_password",  # <<< CHANGE THIS
+    "driver": "com.mysql.cj.jdbc.Driver" # Driver class for MySQL 8.0+
+}
+
+# Target table name in MySQL
+mysql_table_name = "sales_returns_summary"
+
+try:
+    # Write the DataFrame to the MySQL table
+    # mode="overwrite": Drops the table if it exists and recreates it.
+    #                  Use "append" to add rows to an existing table.
+    print(f"\nAttempting to push data to MySQL table '{mysql_table_name}'...")
+    mysql_ready_df.write.jdbc(
+        url=jdbc_url,
+        table=mysql_table_name,
+        mode="overwrite", # Options: "overwrite", "append", "ignore", "error"
+        properties=connection_properties
+    )
+    print(f"Successfully pushed data to MySQL table '{mysql_table_name}'.")
+
+except Exception as e:
+    print(f"Error pushing data to MySQL: {e}")
+
+finally:
+    # Stop Spark Session
+    spark.stop()
+    print("Spark Session stopped.")
